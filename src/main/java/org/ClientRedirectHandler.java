@@ -1,8 +1,10 @@
 package org;
 
 import io.netty.handler.codec.http.HttpResponseStatus;
+import io.vertx.core.http.HttpClientOptions;
 import io.vertx.core.json.JsonArray;
 import io.vertx.core.json.JsonObject;
+import io.vertx.rxjava.core.Vertx;
 import io.vertx.rxjava.core.buffer.Buffer;
 import io.vertx.rxjava.core.http.HttpClient;
 import io.vertx.rxjava.core.http.HttpClientRequest;
@@ -18,56 +20,49 @@ import rx.subjects.ReplaySubject;
 public class ClientRedirectHandler 
 {
 	protected static final Logger log = LoggerFactory.getLogger(ClientRedirectHandler.class);
-	
-	private HttpClient client;
+	private Vertx vertx;
 	private int maxRedirectsCount;
 	private JsonArray urlsList;
 	private String initialUrl;
 	
-	public ClientRedirectHandler(HttpClient client, String url, int maxRedirectsCount) {
-		this.client = client;
+	public ClientRedirectHandler(Vertx vertx, String url, int maxRedirectsCount) {
 		this.initialUrl = url;
 		this.maxRedirectsCount = maxRedirectsCount;
-		
+		this.vertx = vertx;
 		this.urlsList = new JsonArray();
-		JsonObject jo = new JsonObject();
-		jo.put("url", url);
-		urlsList.add(jo);
 	}
 
 	private Observable<Buffer> unshorten(String url) {
-				
+		
 		URI uri = null;
 		try {
-			uri = new URI(url);
+			uri = buildURI(url);
 		} catch (Exception ex) {
-			return Observable.error(new Exception("invalid url", ex));		
-		}
-
-		int port = uri.getPort();
-		if (port <= 0) {
-			String scheme = uri.getScheme();
-			if ("http".equalsIgnoreCase(scheme)) {
-				port = 80;
-			} else if ("https".equalsIgnoreCase(scheme)) {
-				port = 443;
-			} else {
-				return Observable.error(new Exception("unknown port"));
-			}
-		}
-
-		String requestURI = uri.getRawPath();
-		String query = uri.getRawQuery();
-		if (query != null && !query.trim().isEmpty()) {
-			requestURI += "?" + query;
+			return Observable.error(new Exception("invalid url: " + url, ex));		
 		}
 		
-		HttpClientRequest request = client.get(port, uri.getHost(), requestURI);
+		JsonObject info = new JsonObject();
+		info.put("url", uri.toString());
+		urlsList.add(info);
+		
+		// create client, and enable SSL support if needed
+		HttpClientOptions options = new HttpClientOptions();
+		if (isSSL(uri)) {
+			options.setSsl(true);
+			options.setTrustAll(true);
+		}
+		HttpClient client = vertx.createHttpClient(options);
+		String requestURI = getRequestURI(uri);
+		HttpClientRequest request = client.get(getPort(uri), uri.getHost(), requestURI);
+		
 		Observable<Buffer> obs = request.toObservable()
 		.flatMap(response -> {
 			final String location = response.getHeader("location");
 			final int statusCode = response.statusCode();
 			boolean redirect = false;
+			
+			// update current url info
+			info.put("statusCode", statusCode);
 			
 			// 301, 302, 303, 307
 			if (statusCode == HttpResponseStatus.MOVED_PERMANENTLY.code() ||					
@@ -77,6 +72,7 @@ public class ClientRedirectHandler
 				redirect = true;
 			}
 			
+			// location must exists if is redirect
 			if (redirect && (location == null || location.trim().isEmpty())) {
 				return Observable.error(new Exception("location is empty"));
 			}
@@ -90,17 +86,10 @@ public class ClientRedirectHandler
 			if (urlsList.size() > maxRedirectsCount) {
 				return Observable.error(new Exception("max redirects count reached"));
 			}
-						
-			// update current url info
-			JsonObject info = urlsList.getJsonObject(urlsList.size()-1);
-			info.put("statusCode", statusCode);
 			
 			// return or expand
 			if (redirect) {
 				// expand url
-				JsonObject newInfo = new JsonObject();
-				newInfo.put("url", location);
-				urlsList.add(newInfo);
 				return unshorten(location);
 			} else {
 				// return result
@@ -115,6 +104,53 @@ public class ClientRedirectHandler
 			request.end();
 		});
 		
+	}
+
+	private boolean isSSL(URI uri) {
+		if ("https".equalsIgnoreCase(uri.getScheme())) {
+			return true;
+		}
+		return false;
+	}
+
+	private String getRequestURI(URI uri) {
+		String requestURI = uri.getRawPath();
+		String query = uri.getRawQuery();
+		if (query != null && !query.trim().isEmpty()) {
+			requestURI += "?" + query;
+		}
+		String fragment = uri.getRawFragment();
+		if (fragment != null && !fragment.trim().isEmpty()) {
+			requestURI += "#" + fragment;
+		}
+		return requestURI;
+	}
+
+	private URI buildURI(String url) throws Exception {
+    	URI uri = new URI(url);		
+		
+    	String host = uri.getHost();
+    	if (host == null || host.trim().isEmpty()) {
+    		JsonObject info = urlsList.getJsonObject(urlsList.size()-1);
+    		String previousUrl = info.getString("url");
+    		URI p = new URI(previousUrl);
+    		uri = p.resolve(uri);
+    	}
+    	
+		return uri;
+	}
+
+	private int getPort(URI uri) {
+		int port = uri.getPort();
+		if (port <= 0) {
+			String scheme = uri.getScheme();
+			if ("http".equalsIgnoreCase(scheme)) {
+				port = 80;
+			} else if ("https".equalsIgnoreCase(scheme)) {
+				port = 443;
+			}
+		}		
+		return port;
 	}
 
 	private boolean isRedirectLoop(String location) {

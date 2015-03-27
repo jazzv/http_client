@@ -7,7 +7,6 @@ import io.vertx.core.json.JsonArray;
 import io.vertx.core.json.JsonObject;
 import io.vertx.rxjava.core.AbstractVerticle;
 import io.vertx.rxjava.core.buffer.Buffer;
-import io.vertx.rxjava.core.http.HttpClient;
 import rx.Observable;
 
 public class TestClientRedirectHandler extends AbstractVerticle {
@@ -21,11 +20,9 @@ public class TestClientRedirectHandler extends AbstractVerticle {
 	public void test() {	
 		
 		String url = "http://t.co/Oj3GYaGzER";
-		
 		int maxRedirectsCount = 5;
-		HttpClient client = vertx.createHttpClient();
 
-		ClientRedirectHandler rh = new ClientRedirectHandler(client, url, maxRedirectsCount);
+		ClientRedirectHandler rh = new ClientRedirectHandler(vertx, url, maxRedirectsCount);
 
 		Observable<Buffer> obs = rh.toObservable();
 		
